@@ -9,6 +9,7 @@ Parameters:
     Description: Secrets Manager secret name holding the GCP service account JSON key
   AssumeRoleArn:
     Type: String
+    Default: ""
     Description: IAM role ARN that GCP Storage Transfer Service assumes to read from S3
   LogRetentionDays:
     Type: Number

@@ -5,5 +5,4 @@ stack_name = "sample-lambda-endpoint"
 resolve_s3 = true
 capabilities = "CAPABILITY_IAM"
 region = "us-east-1"
-AssumeRoleArn = "arn:aws:iam::902747178791:role/STS_Trusted_Role"
-GcpSaSecretName = "arn:aws:secretsmanager:us-east-1:902747178791:secret:sample/gcp/secret-aDo9E1"
+parameter_overrides = "AssumeRoleArn=arn:aws:iam::902747178791:role/STS_Trusted_Role GcpSaSecretName=sample/gcp/secret"
