@@ -1,19 +1,39 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Sample Lambda API endpoint
+Description: Sample Lambda API endpoint with S3-to-GCP transfer via STS
+
+Parameters:
+  GcpSaSecretName:
+    Type: String
+    Default: gcp-sa-key
+    Description: Secrets Manager secret name holding the GCP service account JSON key
+  AssumeRoleArn:
+    Type: String
+    Description: IAM role ARN that GCP Storage Transfer Service assumes to read from S3
 
 Globals:
   Function:
-    Timeout: 10
-    Runtime: nodejs20.x
-    MemorySize: 128
+    Timeout: 60
+    Runtime: python3.12
+    MemorySize: 256
 
 Resources:
   HelloFunction:
     Type: AWS::Serverless::Function
     Properties:
       Handler: src/handler.handler
-      Description: Handles /hello API requests
+      Description: Handles API requests for /hello and /transfer
+      Environment:
+        Variables:
+          GCP_SA_SECRET_NAME: !Ref GcpSaSecretName
+          ASSUME_ROLE_ARN: !Ref AssumeRoleArn
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GcpSaSecretName}-*"
       Events:
         GetHello:
           Type: HttpApi
@@ -25,11 +45,22 @@ Resources:
           Properties:
             Path: /hello
             Method: POST
+        PostTransfer:
+          Type: HttpApi
+          Properties:
+            Path: /transfer
+            Method: POST
 
 Outputs:
   ApiUrl:
     Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  HelloEndpoint:
+    Description: Hello endpoint
     Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/hello"
+  TransferEndpoint:
+    Description: Transfer endpoint
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/transfer"
   HelloFunctionArn:
     Description: Lambda function ARN
     Value: !GetAtt HelloFunction.Arn

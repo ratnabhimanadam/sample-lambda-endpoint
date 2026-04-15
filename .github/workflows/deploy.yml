@@ -16,13 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: "20"
-          cache: npm
+          python-version: "3.12"
+          cache: pip
 
-      - run: npm ci
-      - run: npm test
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest tests/ -v
 
   deploy:
     needs: test
@@ -31,12 +31,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: "20"
-          cache: npm
-
-      - run: npm ci
+          python-version: "3.12"
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
