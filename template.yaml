@@ -11,11 +11,6 @@ Parameters:
     Type: String
     Default: ""
     Description: IAM role ARN that GCP Storage Transfer Service assumes to read from S3
-  LogRetentionDays:
-    Type: Number
-    Default: 14
-    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
-    Description: CloudWatch Logs retention in days
 
 Globals:
   Function:
@@ -64,11 +59,6 @@ Resources:
             Path: /transfer
             Method: POST
 
-  HelloFunctionLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub "/aws/lambda/${HelloFunction}"
-      RetentionInDays: !Ref LogRetentionDays
 
 Outputs:
   ApiUrl:
