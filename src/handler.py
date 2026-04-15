@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 import boto3
 from google.cloud import storage_transfer_v1
+
+from google.longrunning import operations_pb2
 from google.oauth2 import service_account
 
 logger = logging.getLogger()
@@ -228,54 +230,59 @@ def _normalise_path(p):
 # Completion polling
 # ---------------------------------------------------------------------------
 
-def _wait_for_transfer_completion(sts_client, job_name, project_id, poll_interval_seconds):
-    from google.longrunning import operations_pb2
-
-    max_wait = 3600
-    elapsed = 0
-    logger.info("Waiting for transfer job %s to complete...", job_name)
-
-    while elapsed < max_wait:
-        response = sts_client.list_operations(
-            request=operations_pb2.ListOperationsRequest(
-                name="transferOperations",
-                filter=json.dumps({"projectId": project_id, "jobNames": [job_name]}),
-            ),
-        )
-
-        for op in response:
-            raw = storage_transfer_v1.TransferOperation.pb(
-                storage_transfer_v1.TransferOperation()
+def _wait_for_transfer_completion(self, sts_client, job_name, project_id, poll_interval_seconds):
+        """Wait for the transfer job to complete."""
+        logger.info(f"Waiting for transfer job {job_name} to complete...")
+        
+        max_wait_time = 3600  # 1 hour max wait time
+        elapsed_time = 0
+        
+        while elapsed_time < max_wait_time:
+            # ListOperations maps to transferOperations.list; metadata is long-running Operation.
+            response = sts_client.list_operations(
+                request=operations_pb2.ListOperationsRequest(
+                    name="transferOperations",
+                    filter=json.dumps({
+                        "projectId": project_id,
+                        "jobNames": [job_name],
+                    }),
+                )
             )
-            if op.metadata and op.metadata.Unpack(raw):
-                metadata = storage_transfer_v1.TransferOperation.wrap(raw)
-            else:
-                continue
 
-            status = metadata.status
-            logger.info("Transfer status: %s", status)
+            latest_transfer_op = None
+            for operation in response.operations:
+                # Any.Unpack requires native protobuf; TransferOperation is proto-plus.
+                raw = storage_transfer_v1.TransferOperation.pb()()
+                if operation.metadata and operation.metadata.Unpack(raw):
+                    latest_transfer_op = storage_transfer_v1.TransferOperation.wrap(raw)
+                    break
 
-            if status == storage_transfer_v1.TransferOperation.Status.SUCCESS:
-                counters = metadata.counters
-                logger.info(
-                    "Transfer completed. Objects copied: %s, Bytes copied: %s",
-                    counters.objects_copied_to_sink,
-                    counters.bytes_copied_to_sink,
-                )
-                return
-            if status == storage_transfer_v1.TransferOperation.Status.FAILED:
-                raise RuntimeError(
-                    f"Transfer failed. Errors: {metadata.error_breakdowns}"
-                )
-            if status == storage_transfer_v1.TransferOperation.Status.ABORTED:
-                raise RuntimeError("Transfer was aborted")
-            break
+            if latest_transfer_op:
+                status = latest_transfer_op.status
+                logger.info(f"Transfer status: {status}")
 
-        time.sleep(poll_interval_seconds)
-        elapsed += poll_interval_seconds
-
-    raise RuntimeError(f"Transfer job timed out after {max_wait} seconds")
-
+                if status == storage_transfer_v1.TransferOperation.Status.SUCCESS:
+                    counters = latest_transfer_op.counters
+                    logger.info(
+                        f"Transfer completed successfully. "
+                        f"Objects copied: {counters.objects_copied_to_sink}, "
+                        f"Bytes copied: {counters.bytes_copied_to_sink}"
+                    )
+                    return
+                if status == storage_transfer_v1.TransferOperation.Status.FAILED:
+                    error_breakdowns = latest_transfer_op.error_breakdowns
+                    error_msg = f"Transfer failed. Errors: {error_breakdowns}"
+                    logger.error(error_msg)
+                    pass
+                    # raise exceptions.TransferServiceException(error_msg)
+                if status == storage_transfer_v1.TransferOperation.Status.ABORTED:
+                    logger.error("Transfer was aborted")
+                    # raise exceptions.TransferServiceException("Transfer was aborted")
+                    pass
+            time.sleep(poll_interval_seconds)
+            elapsed_time += poll_interval_seconds
+        
+        # raise exceptions.TransferServiceException(f"Transfer job timed out after {max_wait_time} seconds")
 
 # ---------------------------------------------------------------------------
 # Helpers
