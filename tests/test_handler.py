@@ -144,7 +144,9 @@ class TestTransferSingleBucket:
             "data/file1.csv", "data/file2.csv",
         ]
         assert transfer_job.transfer_spec.gcs_data_sink.bucket_name == "gcs-bucket"
-        assert transfer_job.transfer_spec.gcs_data_sink.path == "imported/"
+        dest_path = transfer_job.transfer_spec.gcs_data_sink.path
+        assert dest_path.startswith("imported/")
+        assert dest_path.endswith("Z/")
         assert transfer_job.transfer_spec.transfer_options.overwrite_objects_already_existing_in_sink is True
 
         mock_client.run_transfer_job.assert_called_once()

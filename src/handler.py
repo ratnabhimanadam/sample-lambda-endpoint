@@ -121,7 +121,8 @@ def _handle_transfer(event, request_id=""):
             )
             logger.info("Files to transfer: %s", keys)
 
-            dest_path = _normalise_path(destination_prefix)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            dest_path = _normalise_path(f"{destination_prefix}/{timestamp}" if destination_prefix else timestamp)
 
             aws_s3_data_source = storage_transfer_v1.AwsS3Data(
                 bucket_name=source_bucket,
