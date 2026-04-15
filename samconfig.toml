@@ -1,0 +1,5 @@
+[default.deploy.parameters]
+stack_name = "sample-lambda-endpoint"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+region = "us-east-1"

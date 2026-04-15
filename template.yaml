@@ -1,0 +1,35 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Sample Lambda API endpoint
+
+Globals:
+  Function:
+    Timeout: 10
+    Runtime: nodejs20.x
+    MemorySize: 128
+
+Resources:
+  HelloFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handler.handler
+      Description: Handles /hello API requests
+      Events:
+        GetHello:
+          Type: HttpApi
+          Properties:
+            Path: /hello
+            Method: GET
+        PostHello:
+          Type: HttpApi
+          Properties:
+            Path: /hello
+            Method: POST
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/hello"
+  HelloFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt HelloFunction.Arn
