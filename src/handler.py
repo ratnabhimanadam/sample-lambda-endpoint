@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import boto3
 from google.cloud import storage_transfer_v1
-from google.cloud.pubsub_v1 import PublisherClient
+from google.cloud.pubsub_v1 import PublisherClient, SubscriberClient
 from google.oauth2 import service_account
 
 logger = logging.getLogger()
@@ -14,6 +14,7 @@ logger.setLevel(logging.INFO)
 
 _secrets_client = None
 _publisher_client = None
+_subscriber_client = None
 
 
 def _get_secrets_client():
@@ -28,6 +29,13 @@ def _get_publisher_client(credentials):
     if _publisher_client is None:
         _publisher_client = PublisherClient(credentials=credentials)
     return _publisher_client
+
+
+def _get_subscriber_client(credentials):
+    global _subscriber_client
+    if _subscriber_client is None:
+        _subscriber_client = SubscriberClient(credentials=credentials)
+    return _subscriber_client
 
 
 def _publish_status(credentials, project_id, status, request_id="", **extra):
@@ -83,6 +91,10 @@ def handler(event, context):
     if method == "POST" and path == "/transfer":
         logger.info("Serving POST /transfer | request_id=%s", request_id)
         return _handle_transfer(event, request_id)
+
+    if method == "GET" and path == "/notifications":
+        logger.info("Serving GET /notifications | request_id=%s", request_id)
+        return _handle_notifications(event, request_id)
 
     logger.warning("Route not found | request_id=%s method=%s path=%s", request_id, method, path)
     return _response(404, {"error": "Not Found"})
@@ -244,6 +256,64 @@ def _handle_transfer(event, request_id=""):
                 logger.warning("Failed to publish FAILED status to Pub/Sub", exc_info=True)
         return _response(500, {
             "error": f"Failed to transfer files using Storage Transfer Service: {exc}",
+        })
+
+
+# ---------------------------------------------------------------------------
+# GET /notifications
+# ---------------------------------------------------------------------------
+
+MAX_PULL_MESSAGES = 20
+
+def _handle_notifications(event, request_id=""):
+    subscription_id = os.environ.get("PUBSUB_SUBSCRIPTION_ID", "")
+    if not subscription_id:
+        logger.warning("PUBSUB_SUBSCRIPTION_ID not set | request_id=%s", request_id)
+        return _response(400, {"error": "PUBSUB_SUBSCRIPTION_ID is not configured"})
+
+    try:
+        gcp_credentials = _get_gcp_credentials()
+        subscriber = _get_subscriber_client(gcp_credentials)
+
+        response = subscriber.pull(
+            request={"subscription": subscription_id, "max_messages": MAX_PULL_MESSAGES},
+            timeout=10,
+        )
+
+        messages = []
+        ack_ids = []
+        for msg in response.received_messages:
+            try:
+                data = json.loads(msg.message.data.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                data = msg.message.data.decode("utf-8", errors="replace")
+            messages.append({
+                "messageId": msg.message.message_id,
+                "publishTime": msg.message.publish_time.isoformat() if msg.message.publish_time else None,
+                "data": data,
+                "attributes": dict(msg.message.attributes),
+            })
+            ack_ids.append(msg.ack_id)
+
+        if ack_ids:
+            subscriber.acknowledge(
+                request={"subscription": subscription_id, "ack_ids": ack_ids},
+            )
+            logger.info(
+                "Acknowledged %d message(s) from %s | request_id=%s",
+                len(ack_ids), subscription_id, request_id,
+            )
+
+        return _response(200, {
+            "messages": messages,
+            "count": len(messages),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    except Exception as exc:
+        logger.exception("Failed to pull notifications | request_id=%s", request_id)
+        return _response(500, {
+            "error": f"Failed to pull notifications: {exc}",
         })
 
 

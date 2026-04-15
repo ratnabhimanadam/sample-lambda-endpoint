@@ -9,6 +9,7 @@ os.environ.setdefault("GCP_SA_SECRET_NAME", "gcp-sa-key")
 os.environ.setdefault("ASSUME_ROLE_ARN", "arn:aws:iam::123456789012:role/GcpStsRole")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 os.environ.setdefault("PUBSUB_TOPIC_ID", "projects/my-gcp-project/topics/transfer-status")
+os.environ.setdefault("PUBSUB_SUBSCRIPTION_ID", "projects/my-gcp-project/subscriptions/transfer-status-sub")
 
 from google.cloud import storage_transfer_v1
 
@@ -84,17 +85,20 @@ def _env_vars():
         "GCP_SA_SECRET_NAME": "gcp-sa-key",
         "ASSUME_ROLE_ARN": "arn:aws:iam::123456789012:role/GcpStsRole",
         "PUBSUB_TOPIC_ID": "projects/my-gcp-project/topics/transfer-status",
+        "PUBSUB_SUBSCRIPTION_ID": "projects/my-gcp-project/subscriptions/transfer-status-sub",
     }):
         yield
 
 
 @pytest.fixture(autouse=True)
-def _reset_publisher():
-    """Reset the cached publisher client between tests."""
+def _reset_clients():
+    """Reset cached pub/sub clients between tests."""
     import src.handler as h
     h._publisher_client = None
+    h._subscriber_client = None
     yield
     h._publisher_client = None
+    h._subscriber_client = None
 
 
 class TestTransferValidation:
@@ -508,3 +512,101 @@ class TestPubSubFailedEvent:
 
         assert res["statusCode"] == 500
         assert "GCP API error" in json.loads(res["body"])["error"]
+
+
+# ---------------------------------------------------------------------------
+# /notifications tests
+# ---------------------------------------------------------------------------
+
+def _make_received_message(message_id, data_dict, attributes=None, ack_id="ack-1"):
+    """Build a mock ReceivedMessage for pull response."""
+    msg = MagicMock()
+    msg.ack_id = ack_id
+    msg.message.message_id = message_id
+    msg.message.data = json.dumps(data_dict).encode("utf-8")
+    msg.message.publish_time.isoformat.return_value = "2026-04-15T12:00:00+00:00"
+    msg.message.attributes = attributes or {}
+    return msg
+
+
+@patch("src.handler._get_subscriber_client")
+@patch("src.handler._get_secrets_client")
+@patch("src.handler.service_account.Credentials.from_service_account_info")
+class TestNotifications:
+    def test_pulls_and_acknowledges_messages(self, mock_creds_factory, mock_get_secrets, mock_get_sub):
+        mock_secrets = MagicMock()
+        mock_get_secrets.return_value = mock_secrets
+        mock_secrets.get_secret_value.return_value = {
+            "SecretString": json.dumps(GCP_SA_INFO),
+        }
+        mock_creds_factory.return_value = _mock_gcp_credentials()
+
+        mock_subscriber = MagicMock()
+        mock_get_sub.return_value = mock_subscriber
+
+        msg1 = _make_received_message("msg-1", {"status": "STARTED", "jobName": "transferJobs/111"}, ack_id="ack-1")
+        msg2 = _make_received_message("msg-2", {"status": "COMPLETED", "jobName": "transferJobs/111"}, ack_id="ack-2")
+        mock_subscriber.pull.return_value.received_messages = [msg1, msg2]
+
+        res = handler(_event("GET", "/notifications"), _ctx())
+
+        assert res["statusCode"] == 200
+        body = json.loads(res["body"])
+        assert body["count"] == 2
+        assert body["messages"][0]["data"]["status"] == "STARTED"
+        assert body["messages"][1]["data"]["status"] == "COMPLETED"
+
+        mock_subscriber.pull.assert_called_once()
+        pull_req = mock_subscriber.pull.call_args[1]["request"]
+        assert pull_req["subscription"] == "projects/my-gcp-project/subscriptions/transfer-status-sub"
+        assert pull_req["max_messages"] == 20
+
+        mock_subscriber.acknowledge.assert_called_once()
+        ack_req = mock_subscriber.acknowledge.call_args[1]["request"]
+        assert set(ack_req["ack_ids"]) == {"ack-1", "ack-2"}
+
+    def test_returns_empty_when_no_messages(self, mock_creds_factory, mock_get_secrets, mock_get_sub):
+        mock_secrets = MagicMock()
+        mock_get_secrets.return_value = mock_secrets
+        mock_secrets.get_secret_value.return_value = {
+            "SecretString": json.dumps(GCP_SA_INFO),
+        }
+        mock_creds_factory.return_value = _mock_gcp_credentials()
+
+        mock_subscriber = MagicMock()
+        mock_get_sub.return_value = mock_subscriber
+        mock_subscriber.pull.return_value.received_messages = []
+
+        res = handler(_event("GET", "/notifications"), _ctx())
+
+        assert res["statusCode"] == 200
+        body = json.loads(res["body"])
+        assert body["count"] == 0
+        assert body["messages"] == []
+        mock_subscriber.acknowledge.assert_not_called()
+
+    def test_500_on_pull_error(self, mock_creds_factory, mock_get_secrets, mock_get_sub):
+        mock_secrets = MagicMock()
+        mock_get_secrets.return_value = mock_secrets
+        mock_secrets.get_secret_value.return_value = {
+            "SecretString": json.dumps(GCP_SA_INFO),
+        }
+        mock_creds_factory.return_value = _mock_gcp_credentials()
+
+        mock_subscriber = MagicMock()
+        mock_get_sub.return_value = mock_subscriber
+        mock_subscriber.pull.side_effect = RuntimeError("Pub/Sub unavailable")
+
+        res = handler(_event("GET", "/notifications"), _ctx())
+
+        assert res["statusCode"] == 500
+        assert "Pub/Sub unavailable" in json.loads(res["body"])["error"]
+
+
+class TestNotificationsNoSubscription:
+    def test_400_when_subscription_not_configured(self):
+        with mock.patch.dict(os.environ, {"PUBSUB_SUBSCRIPTION_ID": ""}):
+            res = handler(_event("GET", "/notifications"), _ctx())
+
+        assert res["statusCode"] == 400
+        assert "PUBSUB_SUBSCRIPTION_ID" in json.loads(res["body"])["error"]
