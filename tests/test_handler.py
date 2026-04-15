@@ -30,27 +30,33 @@ def _event(method, path, body=None):
     return e
 
 
+def _ctx():
+    ctx = MagicMock()
+    ctx.aws_request_id = "test-request-id"
+    return ctx
+
+
 # ---------------------------------------------------------------------------
 # /hello tests
 # ---------------------------------------------------------------------------
 
 class TestGetHello:
     def test_returns_greeting(self):
-        res = handler(_event("GET", "/hello"), None)
+        res = handler(_event("GET", "/hello"), _ctx())
         assert res["statusCode"] == 200
         body = json.loads(res["body"])
         assert body["message"] == "Hello from Lambda!"
 
 class TestPostHello:
     def test_returns_personalised_greeting(self):
-        res = handler(_event("POST", "/hello", {"name": "Alice"}), None)
+        res = handler(_event("POST", "/hello", {"name": "Alice"}), _ctx())
         assert res["statusCode"] == 200
         body = json.loads(res["body"])
         assert body["message"] == "Hello, Alice!"
 
 class TestUnknownRoute:
     def test_returns_404(self):
-        res = handler(_event("GET", "/unknown"), None)
+        res = handler(_event("GET", "/unknown"), _ctx())
         assert res["statusCode"] == 404
 
 
@@ -80,16 +86,16 @@ def _env_vars():
 
 class TestTransferValidation:
     def test_400_when_source_missing(self):
-        res = handler(_transfer_event({"destinationBucket": "gcs-bucket"}), None)
+        res = handler(_transfer_event({"destinationBucket": "gcs-bucket"}), _ctx())
         assert res["statusCode"] == 400
         assert "source" in json.loads(res["body"])["error"]
 
     def test_400_when_source_empty(self):
-        res = handler(_transfer_event({"source": [], "destinationBucket": "b"}), None)
+        res = handler(_transfer_event({"source": [], "destinationBucket": "b"}), _ctx())
         assert res["statusCode"] == 400
 
     def test_400_when_destination_bucket_missing(self):
-        res = handler(_transfer_event({"source": ["s3://b/key.csv"]}), None)
+        res = handler(_transfer_event({"source": ["s3://b/key.csv"]}), _ctx())
         assert res["statusCode"] == 400
         assert "destinationBucket" in json.loads(res["body"])["error"]
 
@@ -121,7 +127,7 @@ class TestTransferSingleBucket:
             ],
             "destinationBucket": "gcs-bucket",
             "destinationPrefix": "imported",
-        }), None)
+        }), _ctx())
 
         assert res["statusCode"] == 200
         body = json.loads(res["body"])
@@ -170,7 +176,7 @@ class TestTransferMultiBucket:
                 "s3://bucket-b/other/file2.csv",
             ],
             "destinationBucket": "gcs-bucket",
-        }), None)
+        }), _ctx())
 
         assert res["statusCode"] == 200
         body = json.loads(res["body"])
@@ -202,7 +208,7 @@ class TestTransferObjectSource:
         res = handler(_transfer_event({
             "source": [{"uri": "s3://mybucket/path/to/file.parquet"}],
             "destinationBucket": "gcs-bucket",
-        }), None)
+        }), _ctx())
 
         assert res["statusCode"] == 200
         call_kwargs = mock_client.create_transfer_job.call_args
@@ -234,7 +240,7 @@ class TestTransferCustomProject:
             "source": ["s3://b/key.csv"],
             "destinationBucket": "gcs-bucket",
             "gcpProjectId": "custom-project",
-        }), None)
+        }), _ctx())
 
         call_kwargs = mock_client.create_transfer_job.call_args
         job = call_kwargs.kwargs.get("request") or call_kwargs[1].get("request") or call_kwargs[0][0]
@@ -263,7 +269,7 @@ class TestTransferNoAssumeRole:
             handler(_transfer_event({
                 "source": ["s3://b/key.csv"],
                 "destinationBucket": "gcs-bucket",
-            }), None)
+            }), _ctx())
 
         call_kwargs = mock_client.create_transfer_job.call_args
         job = call_kwargs.kwargs.get("request") or call_kwargs[1].get("request") or call_kwargs[0][0]
@@ -289,7 +295,7 @@ class TestTransferErrors:
         res = handler(_transfer_event({
             "source": ["s3://b/key.csv"],
             "destinationBucket": "gcs-bucket",
-        }), None)
+        }), _ctx())
 
         assert res["statusCode"] == 500
         assert "GCP API error" in json.loads(res["body"])["error"]
@@ -305,7 +311,7 @@ class TestTransferErrors:
         res = handler(_transfer_event({
             "source": ["https://not-s3/file.csv"],
             "destinationBucket": "gcs-bucket",
-        }), None)
+        }), _ctx())
 
         assert res["statusCode"] == 500
         assert "Invalid S3 URI" in json.loads(res["body"])["error"]

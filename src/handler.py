@@ -27,8 +27,15 @@ def handler(event, context):
     http = rc.get("http", {})
     method = http.get("method") or event.get("httpMethod", "")
     path = http.get("path") or event.get("path", "")
+    request_id = (context.aws_request_id if context else "local")
+
+    logger.info(
+        "Incoming request | request_id=%s method=%s path=%s",
+        request_id, method, path,
+    )
 
     if method == "GET" and path == "/hello":
+        logger.info("Serving GET /hello | request_id=%s", request_id)
         return _response(200, {
             "message": "Hello from Lambda!",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -37,14 +44,17 @@ def handler(event, context):
     if method == "POST" and path == "/hello":
         body = json.loads(event.get("body") or "{}")
         name = body.get("name", "World")
+        logger.info("Serving POST /hello | request_id=%s name=%s", request_id, name)
         return _response(200, {
             "message": f"Hello, {name}!",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
     if method == "POST" and path == "/transfer":
-        return _handle_transfer(event)
+        logger.info("Serving POST /transfer | request_id=%s", request_id)
+        return _handle_transfer(event, request_id)
 
+    logger.warning("Route not found | request_id=%s method=%s path=%s", request_id, method, path)
     return _response(404, {"error": "Not Found"})
 
 
@@ -52,7 +62,7 @@ def handler(event, context):
 # POST /transfer
 # ---------------------------------------------------------------------------
 
-def _handle_transfer(event):
+def _handle_transfer(event, request_id=""):
     body = json.loads(event.get("body") or "{}")
     source = body.get("source")
     destination_bucket = body.get("destinationBucket")
@@ -63,20 +73,30 @@ def _handle_transfer(event):
     poll_interval_seconds = body.get("pollIntervalSeconds", 20)
 
     if not source or not isinstance(source, list) or len(source) == 0:
+        logger.warning("Validation failed: source missing or empty | request_id=%s", request_id)
         return _response(400, {
             "error": "source is required and must be a non-empty array of S3 URIs",
         })
     if not destination_bucket:
+        logger.warning("Validation failed: destinationBucket missing | request_id=%s", request_id)
         return _response(400, {"error": "destinationBucket is required"})
 
+    logger.info(
+        "Transfer request | request_id=%s source_count=%d destination=gs://%s/%s wait=%s",
+        request_id, len(source), destination_bucket, destination_prefix, wait_for_completion,
+    )
+
     try:
+        logger.info("Fetching GCP credentials from Secrets Manager | request_id=%s", request_id)
         gcp_credentials = _get_gcp_credentials()
         project_id = gcp_project_id or gcp_credentials.project_id
         if not project_id:
+            logger.error("GCP project_id not found | request_id=%s", request_id)
             return _response(400, {
                 "error": "GCP project_id is required but not found in config or parameters",
             })
 
+        logger.info("Initialising GCP STS client | request_id=%s project=%s", request_id, project_id)
         sts_client = storage_transfer_v1.StorageTransferServiceClient(
             credentials=gcp_credentials,
         )
@@ -84,6 +104,11 @@ def _handle_transfer(event):
         bucket_key_pairs = _parse_sources(source)
         pairs_by_bucket = _group_by_bucket(bucket_key_pairs)
         assume_role_arn = os.environ.get("ASSUME_ROLE_ARN")
+        logger.info(
+            "Parsed %d source URIs across %d bucket(s) | request_id=%s assume_role=%s",
+            len(bucket_key_pairs), len(pairs_by_bucket), request_id,
+            bool(assume_role_arn),
+        )
 
         job_names = []
 
@@ -149,7 +174,10 @@ def _handle_transfer(event):
                     sts_client, job_name, project_id, poll_interval_seconds,
                 )
 
-        logger.info("Files uploaded to GCP successfully via Storage Transfer Service")
+        logger.info(
+            "All transfer jobs created successfully | request_id=%s job_count=%d job_names=%s",
+            request_id, len(job_names), job_names,
+        )
         return _response(200, {
             "message": "Transfer jobs created and started successfully",
             "jobNames": job_names,
@@ -157,7 +185,7 @@ def _handle_transfer(event):
         })
 
     except Exception as exc:
-        logger.error("Storage Transfer Service error: %s", exc)
+        logger.exception("Storage Transfer Service error | request_id=%s", request_id)
         return _response(500, {
             "error": f"Failed to transfer files using Storage Transfer Service: {exc}",
         })
