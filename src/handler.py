@@ -113,19 +113,16 @@ def _handle_transfer(event, request_id=""):
         job_names = []
 
         for source_bucket, keys in pairs_by_bucket.items():
-            s3_source_path, include_prefixes = _compute_path_and_prefixes(keys)
-
             logger.info(
                 "Creating transfer job from s3://%s to gs://%s",
                 source_bucket, destination_bucket,
             )
-            logger.info("Files to transfer: %s", include_prefixes)
+            logger.info("Files to transfer: %s", keys)
 
             dest_path = _normalise_path(destination_prefix)
 
             aws_s3_data_source = storage_transfer_v1.AwsS3Data(
                 bucket_name=source_bucket,
-                path=s3_source_path,
             )
             if assume_role_arn:
                 aws_s3_data_source.role_arn = assume_role_arn
@@ -137,7 +134,7 @@ def _handle_transfer(event, request_id=""):
                     path=dest_path,
                 ),
                 object_conditions=storage_transfer_v1.ObjectConditions(
-                    include_prefixes=include_prefixes,
+                    include_prefixes=keys,
                 ),
                 transfer_options=storage_transfer_v1.TransferOptions(
                     overwrite_objects_already_existing_in_sink=True,
@@ -220,25 +217,6 @@ def _group_by_bucket(pairs):
     return grouped
 
 
-def _compute_path_and_prefixes(keys):
-    """Compute the longest common directory prefix and relative include_prefixes."""
-    if not keys:
-        return "", []
-
-    dirs = []
-    for k in keys:
-        last_slash = k.rfind("/")
-        dirs.append("" if last_slash == -1 else k[: last_slash + 1])
-
-    common_prefix = dirs[0]
-    for d in dirs[1:]:
-        while not d.startswith(common_prefix):
-            trim_idx = common_prefix.rfind("/", 0, len(common_prefix) - 1)
-            common_prefix = "" if trim_idx == -1 else common_prefix[: trim_idx + 1]
-
-    include_prefixes = [k[len(common_prefix):] for k in keys]
-    return common_prefix, include_prefixes
-
 
 def _normalise_path(p):
     if not p:
@@ -251,20 +229,29 @@ def _normalise_path(p):
 # ---------------------------------------------------------------------------
 
 def _wait_for_transfer_completion(sts_client, job_name, project_id, poll_interval_seconds):
+    from google.longrunning import operations_pb2
+
     max_wait = 3600
     elapsed = 0
     logger.info("Waiting for transfer job %s to complete...", job_name)
 
     while elapsed < max_wait:
-        response = sts_client.transport.operations_client.list_operations(
-            name="transferOperations",
-            filter=json.dumps({"projectId": project_id, "jobNames": [job_name]}),
+        response = sts_client.list_operations(
+            request=operations_pb2.ListOperationsRequest(
+                name="transferOperations",
+                filter=json.dumps({"projectId": project_id, "jobNames": [job_name]}),
+            ),
         )
 
         for op in response:
-            metadata = storage_transfer_v1.TransferOperation.deserialize(
-                op.metadata.value,
+            raw = storage_transfer_v1.TransferOperation.pb(
+                storage_transfer_v1.TransferOperation()
             )
+            if op.metadata and op.metadata.Unpack(raw):
+                metadata = storage_transfer_v1.TransferOperation.wrap(raw)
+            else:
+                continue
+
             status = metadata.status
             logger.info("Transfer status: %s", status)
 

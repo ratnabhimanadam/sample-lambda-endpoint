@@ -140,8 +140,9 @@ class TestTransferSingleBucket:
 
         assert transfer_job.transfer_spec.aws_s3_data_source.bucket_name == "my-bucket"
         assert transfer_job.transfer_spec.aws_s3_data_source.role_arn == "arn:aws:iam::123456789012:role/GcpStsRole"
-        assert transfer_job.transfer_spec.aws_s3_data_source.path == "data/"
-        assert list(transfer_job.transfer_spec.object_conditions.include_prefixes) == ["file1.csv", "file2.csv"]
+        assert list(transfer_job.transfer_spec.object_conditions.include_prefixes) == [
+            "data/file1.csv", "data/file2.csv",
+        ]
         assert transfer_job.transfer_spec.gcs_data_sink.bucket_name == "gcs-bucket"
         assert transfer_job.transfer_spec.gcs_data_sink.path == "imported/"
         assert transfer_job.transfer_spec.transfer_options.overwrite_objects_already_existing_in_sink is True
@@ -215,7 +216,7 @@ class TestTransferObjectSource:
         job = call_kwargs.kwargs.get("request") or call_kwargs[1].get("request") or call_kwargs[0][0]
         spec = job.transfer_job.transfer_spec
         assert spec.aws_s3_data_source.bucket_name == "mybucket"
-        assert list(spec.object_conditions.include_prefixes) == ["file.parquet"]
+        assert list(spec.object_conditions.include_prefixes) == ["path/to/file.parquet"]
 
 
 @patch("src.handler._get_secrets_client")
