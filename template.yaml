@@ -11,6 +11,10 @@ Parameters:
     Type: String
     Default: ""
     Description: IAM role ARN that GCP Storage Transfer Service assumes to read from S3
+  PubSubTopicId:
+    Type: String
+    Default: ""
+    Description: PubSub topic ID to publish transfer job events to
 
 Globals:
   Function:
@@ -28,6 +32,7 @@ Resources:
         Variables:
           GCP_SA_SECRET_NAME: !Ref GcpSaSecretName
           ASSUME_ROLE_ARN: !Ref AssumeRoleArn
+          PUBSUB_TOPIC_ID: !Ref PubSubTopicId
       Policies:
         - Statement:
             - Effect: Allow

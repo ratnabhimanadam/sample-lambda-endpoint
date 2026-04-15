@@ -1,20 +1,19 @@
 import json
 import logging
 import os
-import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
 import boto3
 from google.cloud import storage_transfer_v1
-
-from google.longrunning import operations_pb2
+from google.cloud.pubsub_v1 import PublisherClient
 from google.oauth2 import service_account
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 _secrets_client = None
+_publisher_client = None
 
 
 def _get_secrets_client():
@@ -22,6 +21,35 @@ def _get_secrets_client():
     if _secrets_client is None:
         _secrets_client = boto3.client("secretsmanager")
     return _secrets_client
+
+
+def _get_publisher_client(credentials):
+    global _publisher_client
+    if _publisher_client is None:
+        _publisher_client = PublisherClient(credentials=credentials)
+    return _publisher_client
+
+
+def _publish_status(credentials, project_id, status, request_id="", **extra):
+    topic_id = os.environ.get("PUBSUB_TOPIC_ID", "")
+    if not topic_id:
+        logger.debug("PUBSUB_TOPIC_ID not set; skipping publish")
+        return
+
+    publisher = _get_publisher_client(credentials)
+    message = {
+        "status": status,
+        "requestId": request_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **extra,
+    }
+    data = json.dumps(message).encode("utf-8")
+    future = publisher.publish(topic_id, data=data)
+    message_id = future.result()
+    logger.info(
+        "Published %s event to %s (message_id=%s)",
+        status, topic_id, message_id,
+    )
 
 
 def handler(event, context):
@@ -71,8 +99,6 @@ def _handle_transfer(event, request_id=""):
     destination_prefix = body.get("destinationPrefix", "")
     gcp_project_id = body.get("gcpProjectId")
     description = body.get("description")
-    wait_for_completion = body.get("waitForCompletion", False)
-    poll_interval_seconds = body.get("pollIntervalSeconds", 20)
 
     if not source or not isinstance(source, list) or len(source) == 0:
         logger.warning("Validation failed: source missing or empty | request_id=%s", request_id)
@@ -84,9 +110,12 @@ def _handle_transfer(event, request_id=""):
         return _response(400, {"error": "destinationBucket is required"})
 
     logger.info(
-        "Transfer request | request_id=%s source_count=%d destination=gs://%s/%s wait=%s",
-        request_id, len(source), destination_bucket, destination_prefix, wait_for_completion,
+        "Transfer request | request_id=%s source_count=%d destination=gs://%s/%s",
+        request_id, len(source), destination_bucket, destination_prefix,
     )
+
+    gcp_credentials = None
+    project_id = None
 
     try:
         logger.info("Fetching GCP credentials from Secrets Manager | request_id=%s", request_id)
@@ -144,11 +173,25 @@ def _handle_transfer(event, request_id=""):
                 ),
             )
 
+            notification_config = None
+            pubsub_topic = os.environ.get("PUBSUB_TOPIC_ID", "")
+            if pubsub_topic:
+                notification_config = storage_transfer_v1.NotificationConfig(
+                    pubsub_topic=pubsub_topic,
+                    event_types=[
+                        storage_transfer_v1.NotificationConfig.EventType.TRANSFER_OPERATION_SUCCESS,
+                        storage_transfer_v1.NotificationConfig.EventType.TRANSFER_OPERATION_FAILED,
+                        storage_transfer_v1.NotificationConfig.EventType.TRANSFER_OPERATION_ABORTED,
+                    ],
+                    payload_format=storage_transfer_v1.NotificationConfig.PayloadFormat.JSON,
+                )
+
             transfer_job = storage_transfer_v1.TransferJob(
                 project_id=project_id,
                 description=description or f"S3→GCS transfer {datetime.now(timezone.utc).isoformat()}",
                 status=storage_transfer_v1.TransferJob.Status.ENABLED,
                 transfer_spec=transfer_spec,
+                notification_config=notification_config,
             )
 
             result = sts_client.create_transfer_job(
@@ -169,10 +212,13 @@ def _handle_transfer(event, request_id=""):
             )
             logger.info("Transfer job started: %s", job_name)
 
-            if wait_for_completion:
-                _wait_for_transfer_completion(
-                    sts_client, job_name, project_id, poll_interval_seconds,
-                )
+            _publish_status(
+                gcp_credentials, project_id, "STARTED",
+                request_id=request_id,
+                jobName=job_name,
+                sourceBucket=source_bucket,
+                destinationBucket=destination_bucket,
+            )
 
         logger.info(
             "All transfer jobs created successfully | request_id=%s job_count=%d job_names=%s",
@@ -186,6 +232,16 @@ def _handle_transfer(event, request_id=""):
 
     except Exception as exc:
         logger.exception("Storage Transfer Service error | request_id=%s", request_id)
+        if gcp_credentials and project_id:
+            try:
+                _publish_status(
+                    gcp_credentials, project_id, "FAILED",
+                    request_id=request_id,
+                    error=str(exc),
+                    destinationBucket=destination_bucket,
+                )
+            except Exception:
+                logger.warning("Failed to publish FAILED status to Pub/Sub", exc_info=True)
         return _response(500, {
             "error": f"Failed to transfer files using Storage Transfer Service: {exc}",
         })
@@ -226,61 +282,6 @@ def _normalise_path(p):
         return ""
     return p if p.endswith("/") else p + "/"
 
-
-# ---------------------------------------------------------------------------
-# Completion polling
-# ---------------------------------------------------------------------------
-
-def _wait_for_transfer_completion(sts_client, job_name, project_id, poll_interval_seconds):
-    from google.longrunning import operations_pb2
-
-    max_wait_time = 3600
-    elapsed_time = 0
-    logger.info("Waiting for transfer job %s to complete...", job_name)
-
-    while elapsed_time < max_wait_time:
-        response = sts_client.list_operations(
-            request=operations_pb2.ListOperationsRequest(
-                name="transferOperations",
-                filter=json.dumps({
-                    "projectId": project_id,
-                    "jobNames": [job_name],
-                }),
-            ),
-        )
-
-        latest_transfer_op = None
-        for operation in response:
-            raw = storage_transfer_v1.TransferOperation.pb(
-                storage_transfer_v1.TransferOperation()
-            )
-            if operation.metadata and operation.metadata.Unpack(raw):
-                latest_transfer_op = storage_transfer_v1.TransferOperation.wrap(raw)
-                break
-
-        if latest_transfer_op:
-            status = latest_transfer_op.status
-            logger.info("Transfer status: %s", status)
-
-            if status == storage_transfer_v1.TransferOperation.Status.SUCCESS:
-                counters = latest_transfer_op.counters
-                logger.info(
-                    "Transfer completed. Objects copied: %s, Bytes copied: %s",
-                    counters.objects_copied_to_sink,
-                    counters.bytes_copied_to_sink,
-                )
-                return
-            if status == storage_transfer_v1.TransferOperation.Status.FAILED:
-                error_msg = f"Transfer failed. Errors: {latest_transfer_op.error_breakdowns}"
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
-            if status == storage_transfer_v1.TransferOperation.Status.ABORTED:
-                raise RuntimeError("Transfer was aborted")
-
-        time.sleep(poll_interval_seconds)
-        elapsed_time += poll_interval_seconds
-
-    raise RuntimeError(f"Transfer job timed out after {max_wait_time} seconds")
 
 # ---------------------------------------------------------------------------
 # Helpers

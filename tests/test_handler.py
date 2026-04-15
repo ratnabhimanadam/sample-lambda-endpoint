@@ -8,6 +8,9 @@ import pytest
 os.environ.setdefault("GCP_SA_SECRET_NAME", "gcp-sa-key")
 os.environ.setdefault("ASSUME_ROLE_ARN", "arn:aws:iam::123456789012:role/GcpStsRole")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+os.environ.setdefault("PUBSUB_TOPIC_ID", "projects/my-gcp-project/topics/transfer-status")
+
+from google.cloud import storage_transfer_v1
 
 from src.handler import handler  # noqa: E402
 
@@ -80,8 +83,18 @@ def _env_vars():
     with mock.patch.dict(os.environ, {
         "GCP_SA_SECRET_NAME": "gcp-sa-key",
         "ASSUME_ROLE_ARN": "arn:aws:iam::123456789012:role/GcpStsRole",
+        "PUBSUB_TOPIC_ID": "projects/my-gcp-project/topics/transfer-status",
     }):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_publisher():
+    """Reset the cached publisher client between tests."""
+    import src.handler as h
+    h._publisher_client = None
+    yield
+    h._publisher_client = None
 
 
 class TestTransferValidation:
@@ -100,11 +113,12 @@ class TestTransferValidation:
         assert "destinationBucket" in json.loads(res["body"])["error"]
 
 
+@patch("src.handler._get_publisher_client")
 @patch("src.handler._get_secrets_client")
 @patch("src.handler.service_account.Credentials.from_service_account_info")
 @patch("src.handler.storage_transfer_v1.StorageTransferServiceClient")
 class TestTransferSingleBucket:
-    def test_creates_and_runs_one_job(self, MockStsClient, mock_creds_factory, mock_get_secrets):
+    def test_creates_and_runs_one_job(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
         mock_secrets = MagicMock()
         mock_get_secrets.return_value = mock_secrets
         mock_secrets.get_secret_value.return_value = {
@@ -149,14 +163,22 @@ class TestTransferSingleBucket:
         assert dest_path.endswith("Z/")
         assert transfer_job.transfer_spec.transfer_options.overwrite_objects_already_existing_in_sink is True
 
+        notif = transfer_job.notification_config
+        assert notif.pubsub_topic == "projects/my-gcp-project/topics/transfer-status"
+        assert storage_transfer_v1.NotificationConfig.EventType.TRANSFER_OPERATION_SUCCESS in notif.event_types
+        assert storage_transfer_v1.NotificationConfig.EventType.TRANSFER_OPERATION_FAILED in notif.event_types
+        assert storage_transfer_v1.NotificationConfig.EventType.TRANSFER_OPERATION_ABORTED in notif.event_types
+        assert notif.payload_format == storage_transfer_v1.NotificationConfig.PayloadFormat.JSON
+
         mock_client.run_transfer_job.assert_called_once()
 
 
+@patch("src.handler._get_publisher_client")
 @patch("src.handler._get_secrets_client")
 @patch("src.handler.service_account.Credentials.from_service_account_info")
 @patch("src.handler.storage_transfer_v1.StorageTransferServiceClient")
 class TestTransferMultiBucket:
-    def test_creates_one_job_per_bucket(self, MockStsClient, mock_creds_factory, mock_get_secrets):
+    def test_creates_one_job_per_bucket(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
         mock_secrets = MagicMock()
         mock_get_secrets.return_value = mock_secrets
         mock_secrets.get_secret_value.return_value = {
@@ -190,11 +212,12 @@ class TestTransferMultiBucket:
         assert mock_client.run_transfer_job.call_count == 2
 
 
+@patch("src.handler._get_publisher_client")
 @patch("src.handler._get_secrets_client")
 @patch("src.handler.service_account.Credentials.from_service_account_info")
 @patch("src.handler.storage_transfer_v1.StorageTransferServiceClient")
 class TestTransferObjectSource:
-    def test_accepts_source_as_objects_with_uri(self, MockStsClient, mock_creds_factory, mock_get_secrets):
+    def test_accepts_source_as_objects_with_uri(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
         mock_secrets = MagicMock()
         mock_get_secrets.return_value = mock_secrets
         mock_secrets.get_secret_value.return_value = {
@@ -221,11 +244,12 @@ class TestTransferObjectSource:
         assert list(spec.object_conditions.include_prefixes) == ["path/to/file.parquet"]
 
 
+@patch("src.handler._get_publisher_client")
 @patch("src.handler._get_secrets_client")
 @patch("src.handler.service_account.Credentials.from_service_account_info")
 @patch("src.handler.storage_transfer_v1.StorageTransferServiceClient")
 class TestTransferCustomProject:
-    def test_uses_gcp_project_id_from_body(self, MockStsClient, mock_creds_factory, mock_get_secrets):
+    def test_uses_gcp_project_id_from_body(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
         mock_secrets = MagicMock()
         mock_get_secrets.return_value = mock_secrets
         mock_secrets.get_secret_value.return_value = {
@@ -250,11 +274,12 @@ class TestTransferCustomProject:
         assert job.transfer_job.project_id == "custom-project"
 
 
+@patch("src.handler._get_publisher_client")
 @patch("src.handler._get_secrets_client")
 @patch("src.handler.service_account.Credentials.from_service_account_info")
 @patch("src.handler.storage_transfer_v1.StorageTransferServiceClient")
 class TestTransferNoAssumeRole:
-    def test_omits_role_arn_when_env_unset(self, MockStsClient, mock_creds_factory, mock_get_secrets):
+    def test_omits_role_arn_when_env_unset(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
         mock_secrets = MagicMock()
         mock_get_secrets.return_value = mock_secrets
         mock_secrets.get_secret_value.return_value = {
@@ -279,11 +304,12 @@ class TestTransferNoAssumeRole:
         assert job.transfer_job.transfer_spec.aws_s3_data_source.role_arn == ""
 
 
+@patch("src.handler._get_publisher_client")
 @patch("src.handler._get_secrets_client")
 @patch("src.handler.service_account.Credentials.from_service_account_info")
 @patch("src.handler.storage_transfer_v1.StorageTransferServiceClient")
 class TestTransferErrors:
-    def test_500_when_create_fails(self, MockStsClient, mock_creds_factory, mock_get_secrets):
+    def test_500_when_create_fails(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
         mock_secrets = MagicMock()
         mock_get_secrets.return_value = mock_secrets
         mock_secrets.get_secret_value.return_value = {
@@ -303,7 +329,7 @@ class TestTransferErrors:
         assert res["statusCode"] == 500
         assert "GCP API error" in json.loads(res["body"])["error"]
 
-    def test_500_for_invalid_s3_uri(self, MockStsClient, mock_creds_factory, mock_get_secrets):
+    def test_500_for_invalid_s3_uri(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
         mock_secrets = MagicMock()
         mock_get_secrets.return_value = mock_secrets
         mock_secrets.get_secret_value.return_value = {
@@ -318,3 +344,167 @@ class TestTransferErrors:
 
         assert res["statusCode"] == 500
         assert "Invalid S3 URI" in json.loads(res["body"])["error"]
+
+
+# ---------------------------------------------------------------------------
+# Pub/Sub publishing tests
+# ---------------------------------------------------------------------------
+
+def _setup_transfer_mocks(mock_get_secrets, mock_creds_factory, MockStsClient):
+    """Wire up the standard mock chain for transfer tests and return the STS mock client."""
+    mock_secrets = MagicMock()
+    mock_get_secrets.return_value = mock_secrets
+    mock_secrets.get_secret_value.return_value = {
+        "SecretString": json.dumps(GCP_SA_INFO),
+    }
+    mock_creds_factory.return_value = _mock_gcp_credentials()
+
+    mock_client = MagicMock()
+    MockStsClient.return_value = mock_client
+    mock_result = MagicMock()
+    mock_result.name = "transferJobs/pub111"
+    mock_client.create_transfer_job.return_value = mock_result
+    return mock_client
+
+
+@patch("src.handler._get_publisher_client")
+@patch("src.handler._get_secrets_client")
+@patch("src.handler.service_account.Credentials.from_service_account_info")
+@patch("src.handler.storage_transfer_v1.StorageTransferServiceClient")
+class TestPubSubStartedEvent:
+    def test_publishes_started_on_job_run(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
+        mock_publisher = MagicMock()
+        mock_publisher.publish.return_value.result.return_value = "msg-1"
+        mock_get_pub.return_value = mock_publisher
+        _setup_transfer_mocks(mock_get_secrets, mock_creds_factory, MockStsClient)
+
+        res = handler(_transfer_event({
+            "source": ["s3://my-bucket/file.csv"],
+            "destinationBucket": "gcs-bucket",
+        }), _ctx())
+
+        assert res["statusCode"] == 200
+        mock_publisher.publish.assert_called_once()
+        call_args = mock_publisher.publish.call_args
+        topic = call_args[0][0]
+        data = json.loads(call_args[1]["data"])
+        assert topic == "projects/my-gcp-project/topics/transfer-status"
+        assert data["status"] == "STARTED"
+        assert data["jobName"] == "transferJobs/pub111"
+        assert data["sourceBucket"] == "my-bucket"
+        assert data["destinationBucket"] == "gcs-bucket"
+        assert data["requestId"] == "test-request-id"
+
+    def test_publishes_started_per_bucket(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
+        mock_publisher = MagicMock()
+        mock_publisher.publish.return_value.result.return_value = "msg-1"
+        mock_get_pub.return_value = mock_publisher
+
+        mock_secrets = MagicMock()
+        mock_get_secrets.return_value = mock_secrets
+        mock_secrets.get_secret_value.return_value = {
+            "SecretString": json.dumps(GCP_SA_INFO),
+        }
+        mock_creds_factory.return_value = _mock_gcp_credentials()
+
+        mock_client = MagicMock()
+        MockStsClient.return_value = mock_client
+        result_a = MagicMock()
+        result_a.name = "transferJobs/aaa"
+        result_b = MagicMock()
+        result_b.name = "transferJobs/bbb"
+        mock_client.create_transfer_job.side_effect = [result_a, result_b]
+
+        res = handler(_transfer_event({
+            "source": [
+                "s3://bucket-a/file1.csv",
+                "s3://bucket-b/file2.csv",
+            ],
+            "destinationBucket": "gcs-bucket",
+        }), _ctx())
+
+        assert res["statusCode"] == 200
+        assert mock_publisher.publish.call_count == 2
+        statuses = [json.loads(c[1]["data"])["status"] for c in mock_publisher.publish.call_args_list]
+        assert statuses == ["STARTED", "STARTED"]
+
+
+@patch("src.handler._get_publisher_client")
+@patch("src.handler._get_secrets_client")
+@patch("src.handler.service_account.Credentials.from_service_account_info")
+@patch("src.handler.storage_transfer_v1.StorageTransferServiceClient")
+class TestPubSubSkipsWhenTopicUnset:
+    def test_no_publish_when_topic_empty(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
+        mock_publisher = MagicMock()
+        mock_get_pub.return_value = mock_publisher
+        mock_client = _setup_transfer_mocks(mock_get_secrets, mock_creds_factory, MockStsClient)
+
+        with mock.patch.dict(os.environ, {"PUBSUB_TOPIC_ID": ""}):
+            res = handler(_transfer_event({
+                "source": ["s3://b/key.csv"],
+                "destinationBucket": "gcs-bucket",
+            }), _ctx())
+
+        assert res["statusCode"] == 200
+        mock_publisher.publish.assert_not_called()
+
+        call_kwargs = mock_client.create_transfer_job.call_args
+        job = call_kwargs.kwargs.get("request") or call_kwargs[1].get("request") or call_kwargs[0][0]
+        assert job.transfer_job.notification_config.pubsub_topic == ""
+
+
+@patch("src.handler._get_publisher_client")
+@patch("src.handler._get_secrets_client")
+@patch("src.handler.service_account.Credentials.from_service_account_info")
+@patch("src.handler.storage_transfer_v1.StorageTransferServiceClient")
+class TestPubSubFailedEvent:
+    def test_publishes_failed_on_error(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
+        mock_publisher = MagicMock()
+        mock_publisher.publish.return_value.result.return_value = "msg-err"
+        mock_get_pub.return_value = mock_publisher
+
+        mock_secrets = MagicMock()
+        mock_get_secrets.return_value = mock_secrets
+        mock_secrets.get_secret_value.return_value = {
+            "SecretString": json.dumps(GCP_SA_INFO),
+        }
+        mock_creds_factory.return_value = _mock_gcp_credentials()
+
+        mock_client = MagicMock()
+        MockStsClient.return_value = mock_client
+        mock_client.create_transfer_job.side_effect = RuntimeError("GCP API error")
+
+        res = handler(_transfer_event({
+            "source": ["s3://b/key.csv"],
+            "destinationBucket": "gcs-bucket",
+        }), _ctx())
+
+        assert res["statusCode"] == 500
+        mock_publisher.publish.assert_called_once()
+        data = json.loads(mock_publisher.publish.call_args[1]["data"])
+        assert data["status"] == "FAILED"
+        assert "GCP API error" in data["error"]
+
+    def test_error_response_even_if_publish_fails(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
+        mock_publisher = MagicMock()
+        mock_publisher.publish.side_effect = Exception("Pub/Sub down")
+        mock_get_pub.return_value = mock_publisher
+
+        mock_secrets = MagicMock()
+        mock_get_secrets.return_value = mock_secrets
+        mock_secrets.get_secret_value.return_value = {
+            "SecretString": json.dumps(GCP_SA_INFO),
+        }
+        mock_creds_factory.return_value = _mock_gcp_credentials()
+
+        mock_client = MagicMock()
+        MockStsClient.return_value = mock_client
+        mock_client.create_transfer_job.side_effect = RuntimeError("GCP API error")
+
+        res = handler(_transfer_event({
+            "source": ["s3://b/key.csv"],
+            "destinationBucket": "gcs-bucket",
+        }), _ctx())
+
+        assert res["statusCode"] == 500
+        assert "GCP API error" in json.loads(res["body"])["error"]

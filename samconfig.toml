@@ -5,4 +5,4 @@ stack_name = "sample-lambda-endpoint"
 resolve_s3 = true
 capabilities = "CAPABILITY_IAM"
 region = "us-east-1"
-parameter_overrides = "AssumeRoleArn=arn:aws:iam::902747178791:role/STS_Trusted_Role GcpSaSecretName=sample/gcp/secret"
+parameter_overrides = "AssumeRoleArn=arn:aws:iam::902747178791:role/STS_Trusted_Role GcpSaSecretName=sample/gcp/secret PubSubTopicId=projects/aws-to-sts-493307/topics/sts-transfer-status"
