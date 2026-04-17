@@ -15,10 +15,6 @@ Parameters:
     Type: String
     Default: ""
     Description: PubSub topic ID to publish transfer job events to
-  PubSubSubscriptionId:
-    Type: String
-    Default: ""
-    Description: PubSub subscription ID to pull transfer status notifications from
 
 Globals:
   Function:
@@ -37,7 +33,6 @@ Resources:
           GCP_SA_SECRET_NAME: !Ref GcpSaSecretName
           ASSUME_ROLE_ARN: !Ref AssumeRoleArn
           PUBSUB_TOPIC_ID: !Ref PubSubTopicId
-          PUBSUB_SUBSCRIPTION_ID: !Ref PubSubSubscriptionId
       Policies:
         - Statement:
             - Effect: Allow
@@ -68,11 +63,11 @@ Resources:
           Properties:
             Path: /transfer
             Method: POST
-        GetNotifications:
+        PostNotifications:
           Type: HttpApi
           Properties:
             Path: /notifications
-            Method: GET
+            Method: POST
 
 
 Outputs:

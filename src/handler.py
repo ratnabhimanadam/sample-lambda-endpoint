@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import os
@@ -6,7 +7,7 @@ from datetime import datetime, timezone
 
 import boto3
 from google.cloud import storage_transfer_v1
-from google.cloud.pubsub_v1 import PublisherClient, SubscriberClient
+from google.cloud.pubsub_v1 import PublisherClient
 from google.oauth2 import service_account
 
 logger = logging.getLogger()
@@ -14,7 +15,6 @@ logger.setLevel(logging.INFO)
 
 _secrets_client = None
 _publisher_client = None
-_subscriber_client = None
 
 
 def _get_secrets_client():
@@ -30,12 +30,6 @@ def _get_publisher_client(credentials):
         _publisher_client = PublisherClient(credentials=credentials)
     return _publisher_client
 
-
-def _get_subscriber_client(credentials):
-    global _subscriber_client
-    if _subscriber_client is None:
-        _subscriber_client = SubscriberClient(credentials=credentials)
-    return _subscriber_client
 
 
 def _publish_status(credentials, project_id, status, request_id="", **extra):
@@ -94,8 +88,8 @@ def handler(event, context):
         logger.info("Serving POST /transfer | request_id=%s", request_id)
         return _handle_transfer(event, request_id)
 
-    if method == "GET" and path == "/notifications":
-        logger.info("Serving GET /notifications | request_id=%s", request_id)
+    if method == "POST" and path == "/notifications":
+        logger.info("Serving POST /notifications | request_id=%s", request_id)
         return _handle_notifications(event, request_id)
 
     logger.warning("Route not found | request_id=%s method=%s path=%s", request_id, method, path)
@@ -263,62 +257,49 @@ def _handle_transfer(event, request_id=""):
 
 
 # ---------------------------------------------------------------------------
-# GET /notifications
+# POST /notifications  (Pub/Sub push endpoint)
 # ---------------------------------------------------------------------------
 
-MAX_PULL_MESSAGES = 20
-
 def _handle_notifications(event, request_id=""):
-    subscription_id = os.environ.get("PUBSUB_SUBSCRIPTION_ID", "")
-    if not subscription_id:
-        logger.warning("PUBSUB_SUBSCRIPTION_ID not set | request_id=%s", request_id)
-        return _response(400, {"error": "PUBSUB_SUBSCRIPTION_ID is not configured"})
-
     try:
-        gcp_credentials = _get_gcp_credentials()
-        project_id = gcp_credentials.project_id
-        subscriber = _get_subscriber_client(gcp_credentials)
-        subscription_path = subscriber.subscription_path(project_id, subscription_id)
+        body = json.loads(event.get("body") or "{}")
+        message = body.get("message", {})
+        if not message:
+            logger.warning("No message in push payload | request_id=%s", request_id)
+            return _response(400, {"error": "Invalid Pub/Sub push message"})
 
-        response = subscriber.pull(
-            request={"subscription": subscription_path, "max_messages": MAX_PULL_MESSAGES},
-            timeout=10,
+        raw_data = message.get("data", "")
+        decoded = base64.b64decode(raw_data).decode("utf-8") if raw_data else ""
+        try:
+            data = json.loads(decoded)
+        except (json.JSONDecodeError, ValueError):
+            data = decoded
+
+        message_id = message.get("messageId") or message.get("message_id", "")
+        publish_time = message.get("publishTime") or message.get("publish_time", "")
+        attributes = message.get("attributes", {})
+        subscription = body.get("subscription", "")
+
+        logger.info(
+            "Received Pub/Sub push | request_id=%s message_id=%s subscription=%s",
+            request_id, message_id, subscription,
         )
+        logger.info("Notification data: %s", json.dumps(data) if isinstance(data, dict) else data)
+        logger.info("Notification attributes: %s", attributes)
 
-        messages = []
-        ack_ids = []
-        for msg in response.received_messages:
-            try:
-                data = json.loads(msg.message.data.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                data = msg.message.data.decode("utf-8", errors="replace")
-            messages.append({
-                "messageId": msg.message.message_id,
-                "publishTime": msg.message.publish_time.isoformat() if msg.message.publish_time else None,
-                "data": data,
-                "attributes": dict(msg.message.attributes),
-            })
-            ack_ids.append(msg.ack_id)
-
-        if ack_ids:
-            subscriber.acknowledge(
-                request={"subscription": subscription_path, "ack_ids": ack_ids},
-            )
-            logger.info(
-                "Acknowledged %d message(s) from %s | request_id=%s",
-                len(ack_ids), subscription_path, request_id,
-            )
-
+        # Return 200 so Pub/Sub acknowledges the message and does not retry.
         return _response(200, {
-            "messages": messages,
-            "count": len(messages),
+            "messageId": message_id,
+            "publishTime": publish_time,
+            "data": data,
+            "attributes": attributes,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
     except Exception as exc:
-        logger.exception("Failed to pull notifications | request_id=%s", request_id)
+        logger.exception("Failed to process push notification | request_id=%s", request_id)
         return _response(500, {
-            "error": f"Failed to pull notifications: {exc}",
+            "error": f"Failed to process notification: {exc}",
         })
 
 
