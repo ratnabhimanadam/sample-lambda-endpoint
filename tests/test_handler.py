@@ -375,7 +375,6 @@ class TestPubSubStartedEvent:
     def test_publishes_started_on_job_run(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
         mock_publisher = MagicMock()
         mock_publisher.publish.return_value.result.return_value = "msg-1"
-        mock_publisher.topic_path.return_value = "projects/my-gcp-project/topics/transfer-status"
         mock_get_pub.return_value = mock_publisher
         _setup_transfer_mocks(mock_get_secrets, mock_creds_factory, MockStsClient)
 
@@ -385,7 +384,6 @@ class TestPubSubStartedEvent:
         }), _ctx())
 
         assert res["statusCode"] == 200
-        mock_publisher.topic_path.assert_called_with("my-gcp-project", "transfer-status")
         mock_publisher.publish.assert_called_once()
         call_args = mock_publisher.publish.call_args
         topic = call_args[0][0]
@@ -400,7 +398,6 @@ class TestPubSubStartedEvent:
     def test_publishes_started_per_bucket(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
         mock_publisher = MagicMock()
         mock_publisher.publish.return_value.result.return_value = "msg-1"
-        mock_publisher.topic_path.return_value = "projects/my-gcp-project/topics/transfer-status"
         mock_get_pub.return_value = mock_publisher
 
         mock_secrets = MagicMock()
@@ -430,6 +427,25 @@ class TestPubSubStartedEvent:
         assert mock_publisher.publish.call_count == 2
         statuses = [json.loads(c[1]["data"])["status"] for c in mock_publisher.publish.call_args_list]
         assert statuses == ["STARTED", "STARTED"]
+
+
+class TestResolveTopicFormats:
+    """_resolve_topic must accept both bare IDs and full resource paths."""
+
+    def test_bare_id(self):
+        from src.handler import _resolve_topic
+        with mock.patch.dict(os.environ, {"PUBSUB_TOPIC_ID": "transfer-status"}):
+            assert _resolve_topic("my-project") == "projects/my-project/topics/transfer-status"
+
+    def test_full_path(self):
+        from src.handler import _resolve_topic
+        with mock.patch.dict(os.environ, {"PUBSUB_TOPIC_ID": "projects/my-project/topics/transfer-status"}):
+            assert _resolve_topic("my-project") == "projects/my-project/topics/transfer-status"
+
+    def test_empty(self):
+        from src.handler import _resolve_topic
+        with mock.patch.dict(os.environ, {"PUBSUB_TOPIC_ID": ""}):
+            assert _resolve_topic("my-project") == ""
 
 
 @patch("src.handler._get_publisher_client")
@@ -464,7 +480,6 @@ class TestPubSubFailedEvent:
     def test_publishes_failed_on_error(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
         mock_publisher = MagicMock()
         mock_publisher.publish.return_value.result.return_value = "msg-err"
-        mock_publisher.topic_path.return_value = "projects/my-gcp-project/topics/transfer-status"
         mock_get_pub.return_value = mock_publisher
 
         mock_secrets = MagicMock()
@@ -492,7 +507,6 @@ class TestPubSubFailedEvent:
     def test_error_response_even_if_publish_fails(self, MockStsClient, mock_creds_factory, mock_get_secrets, mock_get_pub):
         mock_publisher = MagicMock()
         mock_publisher.publish.side_effect = Exception("Pub/Sub down")
-        mock_publisher.topic_path.return_value = "projects/my-gcp-project/topics/transfer-status"
         mock_get_pub.return_value = mock_publisher
 
         mock_secrets = MagicMock()

@@ -32,14 +32,27 @@ def _get_publisher_client(credentials):
 
 
 
+def _resolve_topic(project_id):
+    """Return the fully-qualified Pub/Sub topic or empty string.
+
+    Accepts PUBSUB_TOPIC_ID as either a bare ID ('my-topic') or a full
+    resource path ('projects/my-project/topics/my-topic').
+    """
+    raw = os.environ.get("PUBSUB_TOPIC_ID", "")
+    if not raw:
+        return ""
+    if raw.startswith("projects/"):
+        return raw
+    return f"projects/{project_id}/topics/{raw}"
+
+
 def _publish_status(credentials, project_id, status, request_id="", **extra):
-    topic_id = os.environ.get("PUBSUB_TOPIC_ID", "")
-    if not topic_id:
+    topic_path = _resolve_topic(project_id)
+    if not topic_path:
         logger.debug("PUBSUB_TOPIC_ID not set; skipping publish")
         return
 
     publisher = _get_publisher_client(credentials)
-    topic_path = publisher.topic_path(project_id, topic_id)
     logger.info("Publishing status to topic: %s", topic_path)
     message = {
         "status": status,
@@ -182,9 +195,8 @@ def _handle_transfer(event, request_id=""):
             )
 
             notification_config = None
-            pubsub_topic_id = os.environ.get("PUBSUB_TOPIC_ID", "")
-            if pubsub_topic_id:
-                full_topic = f"projects/{project_id}/topics/{pubsub_topic_id}"
+            full_topic = _resolve_topic(project_id)
+            if full_topic:
                 notification_config = storage_transfer_v1.NotificationConfig(
                     pubsub_topic=full_topic,
                     event_types=[
