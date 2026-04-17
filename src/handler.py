@@ -45,6 +45,8 @@ def _publish_status(credentials, project_id, status, request_id="", **extra):
         return
 
     publisher = _get_publisher_client(credentials)
+    topic_path = publisher.topic_path(project_id, topic_id)
+    logger.info("Publishing status to topic: %s", topic_path)
     message = {
         "status": status,
         "requestId": request_id,
@@ -52,11 +54,11 @@ def _publish_status(credentials, project_id, status, request_id="", **extra):
         **extra,
     }
     data = json.dumps(message).encode("utf-8")
-    future = publisher.publish(topic_id, data=data)
+    future = publisher.publish(topic_path, data=data)
     message_id = future.result()
     logger.info(
         "Published %s event to %s (message_id=%s)",
-        status, topic_id, message_id,
+        status, topic_path, message_id,
     )
 
 
@@ -186,10 +188,11 @@ def _handle_transfer(event, request_id=""):
             )
 
             notification_config = None
-            pubsub_topic = os.environ.get("PUBSUB_TOPIC_ID", "")
-            if pubsub_topic:
+            pubsub_topic_id = os.environ.get("PUBSUB_TOPIC_ID", "")
+            if pubsub_topic_id:
+                full_topic = f"projects/{project_id}/topics/{pubsub_topic_id}"
                 notification_config = storage_transfer_v1.NotificationConfig(
-                    pubsub_topic=pubsub_topic,
+                    pubsub_topic=full_topic,
                     event_types=[
                         storage_transfer_v1.NotificationConfig.EventType.TRANSFER_OPERATION_SUCCESS,
                         storage_transfer_v1.NotificationConfig.EventType.TRANSFER_OPERATION_FAILED,
@@ -273,10 +276,12 @@ def _handle_notifications(event, request_id=""):
 
     try:
         gcp_credentials = _get_gcp_credentials()
+        project_id = gcp_credentials.project_id
         subscriber = _get_subscriber_client(gcp_credentials)
+        subscription_path = subscriber.subscription_path(project_id, subscription_id)
 
         response = subscriber.pull(
-            request={"subscription": subscription_id, "max_messages": MAX_PULL_MESSAGES},
+            request={"subscription": subscription_path, "max_messages": MAX_PULL_MESSAGES},
             timeout=10,
         )
 
@@ -297,11 +302,11 @@ def _handle_notifications(event, request_id=""):
 
         if ack_ids:
             subscriber.acknowledge(
-                request={"subscription": subscription_id, "ack_ids": ack_ids},
+                request={"subscription": subscription_path, "ack_ids": ack_ids},
             )
             logger.info(
                 "Acknowledged %d message(s) from %s | request_id=%s",
-                len(ack_ids), subscription_id, request_id,
+                len(ack_ids), subscription_path, request_id,
             )
 
         return _response(200, {
